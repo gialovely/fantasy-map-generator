@@ -1,89 +1,57 @@
 import numpy as np
 
-def compute_flow_direction(elevation_map, water_map):
-    """
-    Compute the flow direction for each cell in the elevation map using vectorized operations.
-    The function returns a flow direction map where each entry is a tuple (dy, dx).
-    """
+def erode_map(elevation_map, iterations, water_amount, evaporation_rate, sediment_capacity_factor):
     height, width = elevation_map.shape
-    
-    # Extend the elevation map and water map by padding zeros around them
-    extended_elevation = np.pad(elevation_map + water_map, pad_width=1, mode='constant', constant_values=0)
-    
-    # Create slices for each neighbor
-    central = extended_elevation[1:-1, 1:-1]
-    top = extended_elevation[:-2, 1:-1]
-    bottom = extended_elevation[2:, 1:-1]
-    left = extended_elevation[1:-1, :-2]
-    right = extended_elevation[1:-1, 2:]
-    top_left = extended_elevation[:-2, :-2]
-    top_right = extended_elevation[:-2, 2:]
-    bottom_left = extended_elevation[2:, :-2]
-    bottom_right = extended_elevation[2:, 2:]
-    
-    # Find the minimum neighboring elevation for each cell
-    min_neighbor = np.min(np.array([top, bottom, left, right, top_left, top_right, bottom_left, bottom_right]), axis=0)
-    
-    # Compute the flow direction based on the minimum neighbor
-    flow_dir = np.zeros((height, width, 2), dtype=int)
-    flow_dir[(top == min_neighbor) & (central > top)] = (-1, 0)
-    flow_dir[(bottom == min_neighbor) & (central > bottom)] = (1, 0)
-    flow_dir[(left == min_neighbor) & (central > left)] = (0, -1)
-    flow_dir[(right == min_neighbor) & (central > right)] = (0, 1)
-    flow_dir[(top_left == min_neighbor) & (central > top_left)] = (-1, -1)
-    flow_dir[(top_right == min_neighbor) & (central > top_right)] = (-1, 1)
-    flow_dir[(bottom_left == min_neighbor) & (central > bottom_left)] = (1, -1)
-    flow_dir[(bottom_right == min_neighbor) & (central > bottom_right)] = (1, 1)
-    
-    return flow_dir
-
-def move_water_and_sediment(elevation_map, water_map, sediment_map, flow_dir, evaporation_rate, sediment_capacity):
-    """
-    Move water and sediment based on the flow directions using vectorized operations.
-    """
-    height, width = elevation_map.shape
-    
-    # Initialize new water and sediment maps
-    new_water_map = np.zeros((height, width))
-    new_sediment_map = np.zeros((height, width))
-    
-    # Calculate coordinates for source and destination
-    y_coords, x_coords = np.indices((height, width))
-    dest_y_coords = np.clip(y_coords + flow_dir[..., 0], 0, height - 1)
-    dest_x_coords = np.clip(x_coords + flow_dir[..., 1], 0, width - 1)
-    
-    # Move water
-    water_to_move = water_map * (1 - evaporation_rate)
-    np.add.at(new_water_map, (dest_y_coords, dest_x_coords), water_to_move)
-    new_water_map -= water_to_move
-    
-    # Move sediment
-    sediment_capacity_here = water_to_move * sediment_capacity
-    sediment_to_move = np.minimum(sediment_map, sediment_capacity_here)
-    np.add.at(new_sediment_map, (dest_y_coords, dest_x_coords), sediment_to_move)
-    new_sediment_map -= sediment_to_move
-    elevation_map = elevation_map.astype(float)  # Convert to float for the operation
-    elevation_map += sediment_map - sediment_to_move
-    
-    return new_water_map, new_sediment_map
-
-def erode_map(elevation_map, iterations, water_amount, evaporation_rate, sediment_capacity):
-    """
-    Simulate the erosion of an elevation map using water and sediment movement with optimized vectorized operations.
-    """
-    height, width = elevation_map.shape
-    water_map = np.zeros((height, width))
-    sediment_map = np.zeros((height, width))
+    sediment_map = np.zeros_like(elevation_map)
     
     for _ in range(iterations):
-        # Add water
-        water_map += water_amount
+        # Rainfall
+        water_map = np.full_like(elevation_map, water_amount)
         
-        # Calculate flow direction
-        flow_dir = compute_flow_direction(elevation_map, water_map)
-        
-        # Move water and sediment
-        water_map, sediment_map = move_water_and_sediment(elevation_map, water_map, sediment_map, 
-                                                          flow_dir, evaporation_rate, sediment_capacity)
-    
+        for _ in range(5):  # Multiple smaller steps for stability
+            # Calculate Flow Direction & Water Flow
+            flow_directions = calculate_flow_direction(elevation_map + water_map)
+            
+            new_water_map = np.zeros_like(water_map)
+            for y in range(1, height-1):
+                for x in range(1, width-1):
+                    dx, dy = flow_directions[y, x]
+                    if dx != 0 or dy != 0:
+                        flow_amount = water_map[y, x] * 0.1  # 10% of the water flows
+                        new_water_map[y+dy, x+dx] += flow_amount
+                        new_water_map[y, x] -= flow_amount
+            
+                        # Erosion & Deposition
+                        slope = elevation_map[y, x] - elevation_map[y+dy, x+dx]
+                        sediment_capacity = slope * flow_amount * sediment_capacity_factor
+                        sediment_difference = sediment_capacity - sediment_map[y, x]
+                        erosion_amount = min(water_map[y, x], sediment_difference, slope)
+                        
+                        elevation_map[y, x] -= erosion_amount
+                        elevation_map[y+dy, x+dx] += erosion_amount
+
+                        sediment_map[y, x] += erosion_amount
+                        sediment_map[y, x] -= erosion_amount * 0.1  # Some sediment is left behind
+            
+            water_map = new_water_map * (1 - evaporation_rate)
+            
     return elevation_map
+
+def calculate_flow_direction(elevation_map):
+    height, width = elevation_map.shape
+    directions = [(0, -1), (-1, 0), (0, 1), (1, 0)]  # N, W, S, E
+    flow_directions = np.zeros((height, width, 2), dtype=int)
+    
+    for y in range(1, height-1):
+        for x in range(1, width-1):
+            min_height = elevation_map[y, x]
+            min_dir = (0, 0)
+            for dx, dy in directions:
+                if elevation_map[y+dy, x+dx] < min_height:
+                    min_height = elevation_map[y+dy, x+dx]
+                    min_dir = (dx, dy)
+            flow_directions[y, x] = min_dir
+            
+    return flow_directions
+
+
